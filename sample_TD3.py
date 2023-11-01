@@ -50,20 +50,20 @@ class TD3Agent:
 
         self.actor = Actor(self.input_dim, self.output_dim, self.max_action).to(device)
         self.actor_target = copy.deepcopy(self.actor)
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=3e-4)
+        self.actor_optimizer = optim.Adam(self.actor.parameters(), cfg.lr_actor)
 
         self.critic_1 = Critic(self.input_dim, self.output_dim).to(device)
         self.critic_2 = Critic(self.input_dim, self.output_dim).to(device)
         self.critic_target_1 = copy.deepcopy(self.critic_1)
         self.critic_target_2 = copy.deepcopy(self.critic_2)
-        self.critic_optimizer_1 = optim.Adam(self.critic_1.parameters(), lr=3e-4)
-        self.critic_optimizer_2 = optim.Adam(self.critic_2.parameters(), lr=3e-4)
+        self.critic_optimizer_1 = optim.Adam(self.critic_1.parameters(), cfg.lr_critic)
+        self.critic_optimizer_2 = optim.Adam(self.critic_2.parameters(), cfg.lr_critic)
 
         self.gamma = cfg.gamma
-        self.tau = 0.005
-        self.policy_noise = 0.2
-        self.noise_clip = 0.5
-        self.policy_freq = 2
+        self.tau = cfg.tau
+        self.policy_noise = cfg.policy_noise
+        self.noise_clip = cfg.noise_clip
+        self.policy_freq = cfg.policy_freq
         self.total_it = 0
 
     def select_action(self, state):
@@ -248,4 +248,3 @@ def test_td3(cfg, agent, env):
     print(f"平均奖励 (共 {cfg.test_episodes} 轮): {avg_reward}")
 
     return avg_reward, optimal_allocations
-

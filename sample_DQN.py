@@ -6,6 +6,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 device = torch.device("cpu")
+
+
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
@@ -29,25 +31,35 @@ class DQNAgent:
         self.q_net = DQN(cfg.input_dim, cfg.output_dim)
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=0.01)
         self.gamma = cfg.gamma
-        self.epsilon = cfg.epsilon if cfg.is_training else 0.0
-        self.memory = []
+        self.epsilon_start = 1.0  # 初始epsilon值，表示完全随机探索
+        self.epsilon_final = 0.01  # 最终epsilon值，表示最小的随机探索
+        self.epsilon_decay = 2000  # 衰减率
+        self.epsilon = self.epsilon_start  # 当前epsilon值        self.memory = []
         self.batch_size = cfg.batch_size
         self.memory_size = cfg.memory_size
         self.loss_fn = nn.MSELoss()
         self.is_training = cfg.is_training
         self.num_agents = cfg.input_dim
         self.num_tasks = cfg.output_dim
-        self.target_q_net = DQN(cfg.input_dim,cfg.output_dim).to(device)
+        self.target_q_net = DQN(cfg.input_dim, cfg.output_dim).to(device)
         self.update_target_freq = 100
         self.update_count = 0
         self.sync_q_net()
+        self.memory = []
+        self.lr_scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=100, gamma=0.95)
+        self.eps_decay = cfg.eps_decay
 
     def sync_q_net(self):  # 同步主Q网络到目标Q网络
         self.target_q_net.load_state_dict(self.q_net.state_dict())
 
-    def choose_action(self, state):
-        available_tasks = [i-1 for i in range(self.num_tasks + 1) if i not in state]
+    def update_epsilon(self, episode_num):
+        # 使用指数衰减计算epsilon
+        self.epsilon = self.epsilon_final + (self.epsilon_start - self.epsilon_final) * np.exp(-1. * episode_num / self.epsilon_decay)
 
+    def choose_action(self, state):
+        available_tasks = [i - 1 for i in range(self.num_tasks + 1) if i not in state]
+
+        self.epsilon *= self.eps_decay if self.is_training else 1.0
         if self.is_training and np.random.rand() < self.epsilon:
             return random.choice(available_tasks)  # 只从未分配的任务中选择
 
@@ -90,6 +102,46 @@ class DQNAgent:
             self.memory.pop(0)
 
 
+class DDQNAgent(DQNAgent):
+    def __init__(self, cfg):
+        super().__init__(cfg)
+
+    def update(self):
+        if len(self.memory) < self.batch_size:
+            return
+
+        batch = random.sample(self.memory, self.batch_size)
+        states, actions, rewards, next_states = zip(*batch)
+
+        states = torch.FloatTensor(np.array(states)).to(device)
+        actions = torch.LongTensor(actions).unsqueeze(-1).to(device)
+        rewards = torch.FloatTensor(rewards).to(device)
+        next_states = torch.FloatTensor(np.array(next_states)).to(device)
+
+        curr_q_values = self.q_net(states).gather(1, actions)
+
+        # 使用主Q网络选择下一个动作
+        _, best_actions = self.q_net(next_states).max(1, keepdim=True)
+
+        # 使用目标Q网络得到这个动作的Q值
+        next_q_values = self.target_q_net(next_states).gather(1, best_actions)
+
+        target_q_values = rewards + self.gamma * next_q_values
+
+        loss = self.loss_fn(curr_q_values, target_q_values)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        # 更新学习率调度器
+        self.lr_scheduler.step()
+
+        # 定期从主Q网络更新目标Q网络
+        self.update_count += 1
+        if self.update_count % self.update_target_freq == 0:
+            self.sync_q_net()
+
+
 def train_dqn(cfg, agent, env):
     print("DQN开始训练！")
     rewards = []
@@ -100,6 +152,7 @@ def train_dqn(cfg, agent, env):
 
     for episode in range(cfg.episodes):
         state = env.reset()
+        agent.update_epsilon(episode)  # 更新 epsilon 值
         done = False
 
         while not done:
@@ -111,14 +164,14 @@ def train_dqn(cfg, agent, env):
             state = next_state
             env.index *= cfg.eps_decay
 
-        agent.epsilon *= cfg.eps_decay
         rewards.append(total_reward)
         env.total_profit = 0
         avg_reward = np.mean(rewards[-cfg.patience:])
 
         if episode % 100 == 0:
             avg_rewards_every_100.append(np.mean(rewards[-100:]))
-            print(f"第 {episode} 轮, 平均奖励: {np.mean(rewards[-100:])}, 平均奖励 (最近 {cfg.patience} 轮): {avg_reward}")
+            print(
+                f"第 {episode} 轮, 平均奖励: {np.mean(rewards[-100:])}, 平均奖励 (最近 {cfg.patience} 轮): {avg_reward}")
 
         # 如果连续patience轮的平均奖励没有变化，就提前停止训练
         if episode >= cfg.patience and avg_reward == prev_avg_reward:
@@ -130,7 +183,7 @@ def train_dqn(cfg, agent, env):
             no_change_count = 0
         prev_avg_reward = avg_reward
 
-    plt.plot([i*100 for i in range(len(avg_rewards_every_100))], avg_rewards_every_100,label='DQN')
+    plt.plot([i * 100 for i in range(len(avg_rewards_every_100))], avg_rewards_every_100, label='DQN')
     plt.xlabel('Episodes')
     plt.ylabel('Average Reward (Every 100 Episodes)')
     plt.title('Average Reward Over Time')
@@ -141,10 +194,11 @@ def train_dqn(cfg, agent, env):
     return np.mean(rewards)
 
 
-def test_dqn(cfg,agent, env):
+def test_dqn(cfg, agent, env):
     """Test the trained DQN agent over multiple episodes and return the average reward and optimal allocation."""
     total_rewards = []
     optimal_allocations = []
+    normalized_rewards = []
 
     for episode in range(cfg.test_episodes):
         state = env.reset()
@@ -156,14 +210,22 @@ def test_dqn(cfg,agent, env):
             action = agent.choose_action(state)
             next_state, reward, done, _ = env.step(action)
             optimal_actions.append(action)
-            total_reward += reward
+            total_reward = env.total_profit
             state = next_state
 
+        total_possible_reward = sum(env.task_rewards.flatten()) - sum(env.agent_costs)
+        normalized_reward = total_reward / total_possible_reward  # 计算标准化奖励
+
+        env.total_profit = 0
+
         total_rewards.append(total_reward)
+        normalized_rewards.append(normalized_reward)
         optimal_allocations.append(optimal_actions)
         print(f"Episode {episode + 1}, Reward: {total_reward}, Optimal Allocation: {optimal_actions}")
 
     avg_reward = np.mean(total_rewards)
+    avg_normalized_reward = np.mean(normalized_rewards)  # 计算所有episode的平均标准化奖励
     print(f"平均奖励 (共 {cfg.test_episodes} 轮): {avg_reward}")
+    print("标准化平均奖励: ", avg_normalized_reward)
 
     return avg_reward, optimal_allocations
